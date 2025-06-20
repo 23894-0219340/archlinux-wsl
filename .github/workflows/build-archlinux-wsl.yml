@@ -21,127 +21,122 @@ on:
 jobs:
   build:
     runs-on: ubuntu-latest
+    container:
+      image: archlinux:latest
     permissions:
       contents: write
       packages: write
     outputs:
       image-version: ${{ steps.version.outputs.image-version }}
-      
+
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Generate version
-      id: version
-      run: |
-        IMAGE_VERSION=$(date +'%Y.%m.%d.%H%M%S')
-        echo "image-version=${IMAGE_VERSION}" >> $GITHUB_OUTPUT
-        echo "IMAGE_VERSION=${IMAGE_VERSION}" >> $GITHUB_ENV
-        
-    - name: Free disk space
-      run: |
-        sudo rm -rf /usr/share/dotnet
-        sudo rm -rf /usr/local/lib/android
-        sudo rm -rf /opt/ghc
-        sudo rm -rf /opt/hostedtoolcache/CodeQL
-        sudo docker image prune --all --force
-        df -h
-        
-    - name: Install build dependencies
-      run: |
-        sudo apt-get update
-        sudo apt-get install -y \
-          make \
-          devtools \
-          fakechroot \
-          fakeroot \
-          git \
-          curl \
-          wget \
-          xz-utils \
-          tar
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Arch Linux environment
+        run: |
+          # 更新包管理器
+          pacman -Sy --noconfirm
           
-    - name: Clone GitLab archlinux-wsl project
-      run: |
-        git clone https://gitlab.archlinux.org/archlinux/archlinux-wsl.git gitlab-source
-        cd gitlab-source
-        echo "Git clone completed successfully"
-        ls -la
-        
-    - name: Setup build environment
-      run: |
-        cd gitlab-source
-        # 安装额外的依赖包（Ubuntu上需要的）
-        sudo apt-get install -y \
-          arch-install-scripts \
-          archiso \
-          pacman \
-          pacman-contrib \
-          libalpm12
-          
-    - name: Build archlinux-wsl using make
-      run: |
-        cd gitlab-source
-        echo "Starting make build with IMAGE_VERSION=${IMAGE_VERSION}"
-        # 使用原生的 Makefile 进行构建
-        make IMAGE_VERSION="${IMAGE_VERSION}"
-        echo "Make build completed"
-        
-    - name: List generated files
-      run: |
-        cd gitlab-source
-        echo "=== Listing workdir contents ==="
-        find workdir -type f -name "*.wsl" -o -name "*.tar.gz" -o -name "*.sha256" 2>/dev/null || echo "No build artifacts found in workdir"
-        echo "=== Listing all .wsl files ==="
-        find . -type f -name "*.wsl" 2>/dev/null || echo "No .wsl files found"
-        echo "=== Listing output directory ==="
-        if [ -d "workdir/output" ]; then
-          ls -la workdir/output/
-        else
-          echo "workdir/output directory not found"
-        fi
-        
-    - name: Copy build artifacts
-      run: |
-        cd gitlab-source
-        mkdir -p ../artifacts
-        # 查找并复制所有构建产物
-        if [ -d "workdir/output" ]; then
-          echo "Copying from workdir/output"
-          cp workdir/output/*.wsl ../artifacts/ 2>/dev/null || echo "No .wsl files in workdir/output"
-          cp workdir/output/*.tar.gz ../artifacts/ 2>/dev/null || echo "No .tar.gz files in workdir/output" 
-          cp workdir/output/*.sha256 ../artifacts/ 2>/dev/null || echo "No .sha256 files in workdir/output"
-        fi
-        
-        # 如果没有找到文件，尝试在其他位置查找
-        if [ ! -f ../artifacts/*.wsl ] 2>/dev/null; then
-          echo "Searching for .wsl files in current directory"
-          find . -name "*.wsl" -exec cp {} ../artifacts/ \; 2>/dev/null || echo "No .wsl files found"
-        fi
-        
-        echo "=== Final artifacts directory ==="
-        ls -la ../artifacts/
-        
-    - name: Verify build artifacts
-      run: |
-        if [ ! -f artifacts/*.wsl ] 2>/dev/null; then
-          echo "ERROR: No .wsl files found in artifacts"
-          echo "Build may have failed. Let's check the GitLab source directory:"
+          # 安装基础工具
+          pacman -S --noconfirm \
+            base-devel \
+            git \
+            curl \
+            wget \
+            tar \
+            xz \
+            gzip \
+            make \
+            devtools \
+            fakechroot \
+            fakeroot
+
+      - name: Generate version
+        id: version
+        run: |
+          IMAGE_VERSION=$(date +'%Y.%m.%d.%H%M%S')
+          echo "image-version=${IMAGE_VERSION}" >> $GITHUB_OUTPUT
+          echo "IMAGE_VERSION=${IMAGE_VERSION}" >> $GITHUB_ENV
+
+      - name: Free disk space
+        run: |
+          df -h
+          # 在容器中清理不需要的文件
+          pacman -Scc --noconfirm || true
+          df -h
+
+      - name: Clone GitLab archlinux-wsl project
+        run: |
+          git clone https://gitlab.archlinux.org/archlinux/archlinux-wsl.git gitlab-source
           cd gitlab-source
-          find . -type f -name "*archlinux*" | head -20
-          exit 1
-        fi
-        echo "Build artifacts verified successfully"
-        
-    - name: Upload artifacts
-      uses: actions/upload-artifact@v4
-      with:
-        name: archlinux-wsl-${{ steps.version.outputs.image-version }}
-        path: |
-          artifacts/*.wsl
-          artifacts/*.tar.gz
-          artifacts/*.sha256
-        retention-days: 30
+          echo "Git clone completed successfully"
+          ls -la
+
+      - name: Build archlinux-wsl using make
+        run: |
+          cd gitlab-source
+          echo "Starting make build with IMAGE_VERSION=${IMAGE_VERSION}"
+          # 使用原生的 Makefile 进行构建
+          make IMAGE_VERSION="${IMAGE_VERSION}"
+          echo "Make build completed"
+
+      - name: List generated files
+        run: |
+          cd gitlab-source
+          echo "=== Listing workdir contents ==="
+          find workdir -type f -name "*.wsl" -o -name "*.tar.gz" -o -name "*.sha256" 2>/dev/null || echo "No build artifacts found in workdir"
+          echo "=== Listing all .wsl files ==="
+          find . -type f -name "*.wsl" 2>/dev/null || echo "No .wsl files found"
+          echo "=== Listing output directory ==="
+          if [ -d "workdir/output" ]; then
+            ls -la workdir/output/
+          else
+            echo "workdir/output directory not found"
+          fi
+
+      - name: Copy build artifacts
+        run: |
+          cd gitlab-source
+          mkdir -p ../artifacts
+          
+          # 查找并复制所有构建产物
+          if [ -d "workdir/output" ]; then
+            echo "Copying from workdir/output"
+            cp workdir/output/*.wsl ../artifacts/ 2>/dev/null || echo "No .wsl files in workdir/output"
+            cp workdir/output/*.tar.gz ../artifacts/ 2>/dev/null || echo "No .tar.gz files in workdir/output"
+            cp workdir/output/*.sha256 ../artifacts/ 2>/dev/null || echo "No .sha256 files in workdir/output"
+          fi
+          
+          # 如果没有找到文件，尝试在其他位置查找
+          if [ ! -f ../artifacts/*.wsl ] 2>/dev/null; then
+            echo "Searching for .wsl files in current directory"
+            find . -name "*.wsl" -exec cp {} ../artifacts/ \; 2>/dev/null || echo "No .wsl files found"
+          fi
+          
+          echo "=== Final artifacts directory ==="
+          ls -la ../artifacts/
+
+      - name: Verify build artifacts
+        run: |
+          if [ ! -f artifacts/*.wsl ] 2>/dev/null; then
+            echo "ERROR: No .wsl files found in artifacts"
+            echo "Build may have failed. Let's check the GitLab source directory:"
+            cd gitlab-source
+            find . -type f -name "*archlinux*" | head -20
+            exit 1
+          fi
+          echo "Build artifacts verified successfully"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: archlinux-wsl-${{ steps.version.outputs.image-version }}
+          path: |
+            artifacts/*.wsl
+            artifacts/*.tar.gz
+            artifacts/*.sha256
+          retention-days: 30
 
   release:
     runs-on: ubuntu-latest
@@ -149,103 +144,96 @@ jobs:
     if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
-      
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Download artifacts
-      uses: actions/download-artifact@v4
-      with:
-        name: archlinux-wsl-${{ needs.build.outputs.image-version }}
-        path: ./release-artifacts
-        
-    - name: Create Release
-      uses: softprops/action-gh-release@v1
-      with:
-        tag_name: v${{ needs.build.outputs.image-version }}
-        name: Arch Linux WSL ${{ needs.build.outputs.image-version }}
-        body: |
-          # Arch Linux WSL ${{ needs.build.outputs.image-version }}
-          
-          🐧 基于 GitLab 官方 archlinux-wsl 项目构建的最新 Arch Linux WSL 发行版
-          
-          ## 📥 下载文件
-          
-          - **`archlinux-${{ needs.build.outputs.image-version }}.wsl`** - WSL 导入文件（推荐）
-          - **`archlinux-${{ needs.build.outputs.image-version }}.tar.gz`** - 标准 tar.gz 格式  
-          - **`*.sha256`** - 校验和文件
-          
-          ## 🚀 安装方法
-          
-          ### 使用 .wsl 文件 (推荐)
-          ```powershell
-          # 下载 .wsl 文件后
-          wsl --import ArchLinux C:\WSL\ArchLinux archlinux-${{ needs.build.outputs.image-version }}.wsl
-          wsl --set-default ArchLinux
-          wsl -d ArchLinux
-          ```
-          
-          ### 使用 .tar.gz 文件
-          ```powershell
-          # 下载 .tar.gz 文件后  
-          wsl --import ArchLinux C:\WSL\ArchLinux archlinux-${{ needs.build.outputs.image-version }}.tar.gz
-          wsl --set-default ArchLinux
-          wsl -d ArchLinux
-          ```
-          
-          ## ✨ 特性
-          
-          - ✅ **官方构建流程** - 使用 GitLab 官方 archlinux-wsl 项目的原生 Makefile
-          - ✅ **最新 Arch Linux** - 基于最新官方镜像
-          - ✅ **完整系统** - 包含 systemd 支持和完整的包管理
-          - ✅ **开发友好** - 预装常用开发工具
-          - ✅ **WSL 优化** - 针对 WSL 环境优化配置
-          
-          ## 🔐 文件验证
-          
-          ```bash
-          # Windows (PowerShell)
-          Get-FileHash archlinux-${{ needs.build.outputs.image-version }}.wsl -Algorithm SHA256
-          
-          # Linux/macOS  
-          sha256sum archlinux-${{ needs.build.outputs.image-version }}.wsl
-          ```
-          
-          ## 📋 系统信息
-          
-          - **包管理器**: `pacman`
-          - **系统架构**: `x86_64` 
-          - **Locale**: `en_US.UTF-8`
-          - **Init 系统**: `systemd`
-          
-          ## 🔧 首次使用建议
-          
-          ```bash
-          # 更新系统
-          sudo pacman -Syu
-          
-          # 安装 AUR helper (可选)
-          git clone https://aur.archlinux.org/yay.git
-          cd yay && makepkg -si
-          
-          # 配置 Git (如需要)
-          git config --global user.name "Your Name"
-          git config --global user.email "your.email@example.com"
-          ```
-          
-          ---
-          
-          📅 **构建时间**: ${{ github.run_id }}  
-          🔗 **提交**: [`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})  
-          🤖 **自动构建**: GitHub Actions  
-          🏗️ **源项目**: [archlinux-wsl](https://gitlab.archlinux.org/archlinux/archlinux-wsl)
-        files: |
-          ./release-artifacts/*.wsl
-          ./release-artifacts/*.tar.gz
-          ./release-artifacts/*.sha256
-        draft: false
-        prerelease: false
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          name: archlinux-wsl-${{ needs.build.outputs.image-version }}
+          path: ./release-artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ needs.build.outputs.image-version }}
+          name: Arch Linux WSL ${{ needs.build.outputs.image-version }}
+          body: |
+            # Arch Linux WSL ${{ needs.build.outputs.image-version }}
+            
+            🐧 基于 GitLab 官方 archlinux-wsl 项目构建的最新 Arch Linux WSL 发行版
+            
+            ## 📥 下载文件
+            - **`archlinux-${{ needs.build.outputs.image-version }}.wsl`** - WSL 导入文件（推荐）
+            - **`archlinux-${{ needs.build.outputs.image-version }}.tar.gz`** - 标准 tar.gz 格式
+            - **`*.sha256`** - 校验和文件
+            
+            ## 🚀 安装方法
+            
+            ### 使用 .wsl 文件 (推荐)
+            ```powershell
+            # 下载 .wsl 文件后
+            wsl --import ArchLinux C:\\WSL\\ArchLinux archlinux-${{ needs.build.outputs.image-version }}.wsl
+            wsl --set-default ArchLinux
+            wsl -d ArchLinux
+            ```
+            
+            ### 使用 .tar.gz 文件
+            ```powershell
+            # 下载 .tar.gz 文件后
+            wsl --import ArchLinux C:\\WSL\\ArchLinux archlinux-${{ needs.build.outputs.image-version }}.tar.gz
+            wsl --set-default ArchLinux
+            wsl -d ArchLinux
+            ```
+            
+            ## ✨ 特性
+            - ✅ **原生 Arch Linux 构建** - 使用 Arch Linux 容器和原生工具链
+            - ✅ **最新 Arch Linux** - 基于最新官方镜像
+            - ✅ **完整系统** - 包含 systemd 支持和完整的包管理
+            - ✅ **开发友好** - 预装常用开发工具
+            - ✅ **WSL 优化** - 针对 WSL 环境优化配置
+            
+            ## 🔐 文件验证
+            ```bash
+            # Windows (PowerShell)
+            Get-FileHash archlinux-${{ needs.build.outputs.image-version }}.wsl -Algorithm SHA256
+            
+            # Linux/macOS
+            sha256sum archlinux-${{ needs.build.outputs.image-version }}.wsl
+            ```
+            
+            ## 📋 系统信息
+            - **包管理器**: `pacman`
+            - **系统架构**: `x86_64`
+            - **Locale**: `en_US.UTF-8`
+            - **Init 系统**: `systemd`
+            
+            ## 🔧 首次使用建议
+            ```bash
+            # 更新系统
+            sudo pacman -Syu
+            
+            # 安装 AUR helper (可选)
+            git clone https://aur.archlinux.org/yay.git
+            cd yay && makepkg -si
+            
+            # 配置 Git (如需要)
+            git config --global user.name "Your Name"
+            git config --global user.email "your.email@example.com"
+            ```
+            
+            ---
+            📅 **构建时间**: ${{ github.run_id }}  
+            🔗 **提交**: [`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})  
+            🤖 **自动构建**: GitHub Actions (Arch Linux 容器)  
+            🏗️ **源项目**: [archlinux-wsl](https://gitlab.archlinux.org/archlinux/archlinux-wsl)
+          files: |
+            ./release-artifacts/*.wsl
+            ./release-artifacts/*.tar.gz
+            ./release-artifacts/*.sha256
+          draft: false
+          prerelease: false
 
   cleanup:
     runs-on: ubuntu-latest
@@ -253,45 +241,46 @@ jobs:
     if: github.event_name == 'schedule'
     permissions:
       contents: write
-      
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@v4
-      
-    - name: Delete old releases
-      uses: actions/github-script@v7
-      with:
-        script: |
-          // 获取所有 releases
-          const releases = await github.rest.repos.listReleases({
-            owner: context.repo.owner,
-            repo: context.repo.repo,
-            per_page: 100
-          });
-          
-          // 保留最新的 10 个 release，删除其他的
-          const releasesToDelete = releases.data.slice(10);
-          
-          for (const release of releasesToDelete) {
-            if (release.tag_name.startsWith('v')) {
-              console.log(`正在删除旧版本 ${release.tag_name}`);
-              try {
-                await github.rest.repos.deleteRelease({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  release_id: release.id
-                });
-                
-                // 删除对应的 tag
-                await github.rest.git.deleteRef({
-                  owner: context.repo.owner,
-                  repo: context.repo.repo,
-                  ref: `tags/${release.tag_name}`
-                });
-                console.log(`已删除版本 ${release.tag_name}`);
-              } catch (error) {
-                console.log(`删除版本 ${release.tag_name} 时出错: ${error.message}`);
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Delete old releases
+        uses: actions/github-script@v7
+        with:
+          script: |
+            // 获取所有 releases
+            const releases = await github.rest.repos.listReleases({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              per_page: 100
+            });
+            
+            // 保留最新的 10 个 release，删除其他的
+            const releasesToDelete = releases.data.slice(10);
+            
+            for (const release of releasesToDelete) {
+              if (release.tag_name.startsWith('v')) {
+                console.log(`正在删除旧版本 ${release.tag_name}`);
+                try {
+                  await github.rest.repos.deleteRelease({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    release_id: release.id
+                  });
+                  
+                  // 删除对应的 tag
+                  await github.rest.git.deleteRef({
+                    owner: context.repo.owner,
+                    repo: context.repo.repo,
+                    ref: `tags/${release.tag_name}`
+                  });
+                  
+                  console.log(`已删除版本 ${release.tag_name}`);
+                } catch (error) {
+                  console.log(`删除版本 ${release.tag_name} 时出错: ${error.message}`);
+                }
               }
             }
-          }
-          console.log('清理完成！保留了最新的 10 个版本。');
+            
+            console.log('清理完成！保留了最新的 10 个版本。');
