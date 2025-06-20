@@ -59,13 +59,6 @@ jobs:
           echo "image-version=${IMAGE_VERSION}" >> $GITHUB_OUTPUT
           echo "IMAGE_VERSION=${IMAGE_VERSION}" >> $GITHUB_ENV
 
-      - name: Free disk space
-        run: |
-          df -h
-          # 在容器中清理不需要的文件
-          pacman -Scc --noconfirm || true
-          df -h
-
       - name: Clone GitLab archlinux-wsl project
         run: |
           git clone https://gitlab.archlinux.org/archlinux/archlinux-wsl.git gitlab-source
@@ -133,9 +126,7 @@ jobs:
         with:
           name: archlinux-wsl-${{ steps.version.outputs.image-version }}
           path: |
-            artifacts/*.wsl
-            artifacts/*.tar.gz
-            artifacts/*.sha256
+            artifacts/*
           retention-days: 30
       - name: Upload to Release
         uses: softprops/action-gh-release@v1
