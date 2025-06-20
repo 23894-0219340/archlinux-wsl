@@ -8,7 +8,9 @@ on:
     branches: [ main ]
     paths:
       - 'scripts/**'
+      - 'rootfs/**'
       - '.github/workflows/**'
+      - 'Makefile'
   pull_request:
     branches: [ main ]
   workflow_dispatch:
@@ -20,8 +22,9 @@ on:
         type: boolean
 
 env:
-  REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository }}
+  IMAGE_VERSION_MAJOR: '2025'
+  IMAGE_VERSION_MINOR: '04'
+  IMAGE_VERSION_PATCH: '01'
 
 jobs:
   build:
@@ -29,6 +32,9 @@ jobs:
     permissions:
       contents: write
       packages: write
+    
+    outputs:
+      image-version: ${{ steps.version.outputs.image-version }}
       
     steps:
     - name: Checkout repository
@@ -37,11 +43,11 @@ jobs:
     - name: Generate version
       id: version
       run: |
-        VERSION=$(date +'%Y.%m.%d')
-        BUILD_NUM=$(date +'%H%M')
-        FULL_VERSION="${VERSION}.${BUILD_NUM}"
-        echo "version=${FULL_VERSION}" >> $GITHUB_OUTPUT
-        echo "date=${VERSION}" >> $GITHUB_OUTPUT
+        BUILD_ID=$(date +'%y%m%d%H%M%S')
+        IMAGE_VERSION="${{ env.IMAGE_VERSION_MAJOR }}.${{ env.IMAGE_VERSION_MINOR }}.${{ env.IMAGE_VERSION_PATCH }}.${BUILD_ID}"
+        echo "image-version=${IMAGE_VERSION}" >> $GITHUB_OUTPUT
+        echo "build-id=${BUILD_ID}" >> $GITHUB_OUTPUT
+        echo "IMAGE_VERSION=${IMAGE_VERSION}" >> $GITHUB_ENV
         
     - name: Free disk space
       run: |
@@ -52,27 +58,47 @@ jobs:
         sudo docker image prune --all --force
         df -h
         
-    - name: Set up Docker Buildx
-      uses: docker/setup-buildx-action@v3
-      
-    - name: Create build directory
+    - name: Install dependencies
       run: |
-        mkdir -p workdir/output
+        sudo apt-get update
+        sudo apt-get install -y \
+          make \
+          fakechroot \
+          fakeroot \
+          debootstrap \
+          arch-install-scripts \
+          xz-utils \
+          tar \
+          curl \
+          wget \
+          gzip
+          
+    - name: Create working directories
+      run: |
+        mkdir -p workdir/{rootfs,output}
         
-    - name: Build Arch Linux rootfs
+    - name: Build Arch Linux base system
       run: |
-        # 使用Docker创建Arch Linux根文件系统
-        docker run --rm --privileged \
-          -v "$(pwd)/workdir:/workdir" \
+        # 下载并解压 Arch Linux 基础系统
+        cd workdir
+        
+        # 使用官方脚本创建 Arch Linux rootfs
+        sudo docker run --rm --privileged \
+          -v "$(pwd):/workdir" \
           archlinux:latest \
           bash -c "
-            # 更新系统
+            # 安装必要工具
             pacman -Syu --noconfirm
+            pacman -S --noconfirm arch-install-scripts pacman-contrib
             
-            # 安装基础包
-            pacman -S --needed --noconfirm \
+            # 创建 rootfs
+            mkdir -p /workdir/rootfs
+            
+            # 安装基础系统到 rootfs
+            pacstrap /workdir/rootfs \
               base \
               base-devel \
+              linux-firmware \
               sudo \
               vim \
               nano \
@@ -83,51 +109,128 @@ jobs:
               neofetch \
               openssh \
               networkmanager \
-              systemd-sysvcompat
+              systemd-sysvcompat \
+              man-db \
+              man-pages \
+              which \
+              python \
+              python-pip
             
-            # 创建用户
-            useradd -m -G wheel -s /bin/bash archuser
-            echo 'archuser ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+            # 配置系统
+            arch-chroot /workdir/rootfs /bin/bash -c '
+              # 设置时区
+              ln -sf /usr/share/zoneinfo/UTC /etc/localtime
+              
+              # 生成locale
+              echo \"en_US.UTF-8 UTF-8\" > /etc/locale.gen
+              locale-gen
+              echo \"LANG=en_US.UTF-8\" > /etc/locale.conf
+              
+              # 创建用户
+              useradd -m -G wheel -s /bin/bash archuser
+              echo \"archuser ALL=(ALL) NOPASSWD:ALL\" >> /etc/sudoers
+              
+              # WSL配置
+              cat > /etc/wsl.conf << EOF
+[boot]
+systemd=true
+
+[user]
+default=archuser
+
+[interop]
+enabled=true
+appendWindowsPath=true
+
+[network]
+generateHosts=true
+generateResolvConf=true
+EOF
+              
+              # 启用必要服务
+              systemctl enable NetworkManager
+              
+              # 清理缓存
+              pacman -Scc --noconfirm
+            '
             
-            # 配置locale
-            echo 'en_US.UTF-8 UTF-8' > /etc/locale.gen
-            locale-gen
-            echo 'LANG=en_US.UTF-8' > /etc/locale.conf
-            
-            # WSL配置
-            echo '[boot]' > /etc/wsl.conf
-            echo 'systemd=true' >> /etc/wsl.conf
-            echo '[user]' >> /etc/wsl.conf
-            echo 'default=archuser' >> /etc/wsl.conf
-            
-            # 创建tar包
-            tar -czf /workdir/output/archlinux-${{ steps.version.outputs.version }}.tar.gz \
-              --exclude=/proc/* \
-              --exclude=/sys/* \
-              --exclude=/dev/* \
-              --exclude=/tmp/* \
-              --exclude=/workdir \
-              /
+            # 修复权限
+            chown -R 1000:1000 /workdir/rootfs/home/archuser
           "
           
-    - name: Generate checksums
+    - name: Create WSL tarball
+      run: |
+        cd workdir/rootfs
+        
+        # 排除不需要的目录和文件
+        sudo tar \
+          --exclude='proc/*' \
+          --exclude='sys/*' \
+          --exclude='dev/*' \
+          --exclude='tmp/*' \
+          --exclude='run/*' \
+          --exclude='mnt/*' \
+          --exclude='media/*' \
+          --exclude='var/cache/pacman/pkg/*' \
+          --exclude='var/log/*' \
+          -czf "../output/archlinux-${{ steps.version.outputs.image-version }}.tar.gz" \
+          .
+          
+    - name: Create WSL file
       run: |
         cd workdir/output
-        sha256sum *.tar.gz > checksums.sha256
+        
+        # 重命名为 .wsl 文件（实际上就是重命名的 tar.gz）
+        cp "archlinux-${{ steps.version.outputs.image-version }}.tar.gz" \
+           "archlinux-${{ steps.version.outputs.image-version }}.wsl"
+        
+        # 生成校验和
+        sha256sum "archlinux-${{ steps.version.outputs.image-version }}.wsl" > \
+                  "archlinux-${{ steps.version.outputs.image-version }}.wsl.sha256"
+        sha256sum "archlinux-${{ steps.version.outputs.image-version }}.tar.gz" > \
+                  "archlinux-${{ steps.version.outputs.image-version }}.tar.gz.sha256"
+        
+        # 显示文件信息
+        ls -lh
+        
+    - name: Test WSL file integrity
+      run: |
+        cd workdir/output
+        
+        # 验证文件完整性
+        sha256sum -c "archlinux-${{ steps.version.outputs.image-version }}.wsl.sha256"
+        sha256sum -c "archlinux-${{ steps.version.outputs.image-version }}.tar.gz.sha256"
+        
+        # 验证tar文件结构
+        tar -tzf "archlinux-${{ steps.version.outputs.image-version }}.wsl" | head -20
+        
+        # 检查关键文件
+        if ! tar -tzf "archlinux-${{ steps.version.outputs.image-version }}.wsl" | grep -q "etc/wsl.conf"; then
+          echo "ERROR: etc/wsl.conf not found in WSL image"
+          exit 1
+        fi
+        
+        if ! tar -tzf "archlinux-${{ steps.version.outputs.image-version }}.wsl" | grep -q "home/archuser"; then
+          echo "ERROR: archuser home directory not found"
+          exit 1
+        fi
+        
+        echo "WSL image validation passed!"
         
     - name: Upload artifacts
       uses: actions/upload-artifact@v4
       with:
-        name: archlinux-wsl-${{ steps.version.outputs.version }}
+        name: archlinux-wsl-${{ steps.version.outputs.image-version }}
         path: |
+          workdir/output/*.wsl
           workdir/output/*.tar.gz
-          workdir/output/checksums.sha256
+          workdir/output/*.sha256
         retention-days: 30
 
   release:
     runs-on: ubuntu-latest
     needs: build
-    if: github.event_name == 'schedule' && github.ref == 'refs/heads/main'
+    if: github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     permissions:
       contents: write
       
@@ -135,54 +238,151 @@ jobs:
     - name: Checkout repository
       uses: actions/checkout@v4
       
-    - name: Generate version
-      id: version
-      run: |
-        VERSION=$(date +'%Y.%m.%d')
-        BUILD_NUM=$(date +'%H%M')
-        FULL_VERSION="${VERSION}.${BUILD_NUM}"
-        echo "version=${FULL_VERSION}" >> $GITHUB_OUTPUT
-        
     - name: Download artifacts
       uses: actions/download-artifact@v4
       with:
-        name: archlinux-wsl-${{ steps.version.outputs.version }}
+        name: archlinux-wsl-${{ needs.build.outputs.image-version }}
         path: ./artifacts
         
     - name: Create Release
       uses: softprops/action-gh-release@v1
       with:
-        tag_name: v${{ steps.version.outputs.version }}
-        name: Arch Linux WSL ${{ steps.version.outputs.version }}
+        tag_name: v${{ needs.build.outputs.image-version }}
+        name: Arch Linux WSL ${{ needs.build.outputs.image-version }}
         body: |
-          # Arch Linux WSL ${{ steps.version.outputs.version }}
+          # Arch Linux WSL ${{ needs.build.outputs.image-version }}
           
-          自动化构建的Arch Linux WSL发行版
+          🐧 最新构建的 Arch Linux WSL 发行版，基于官方 Arch Linux 镜像制作。
           
-          ## 安装方法
+          ## 📥 下载文件
           
-          1. 下载 `archlinux-${{ steps.version.outputs.version }}.tar.gz`
-          2. 导入WSL: `wsl --import ArchLinux C:\path\to\install archlinux-${{ steps.version.outputs.version }}.tar.gz`
-          3. 设为默认: `wsl --set-default ArchLinux`
+          - **`archlinux-${{ needs.build.outputs.image-version }}.wsl`** - WSL 导入文件（推荐）
+          - **`archlinux-${{ needs.build.outputs.image-version }}.tar.gz`** - 标准 tar.gz 格式
+          - **`*.sha256`** - 校验和文件
           
-          ## 功能特性
+          ## 🚀 安装方法
           
-          - ✅ 最新的Arch Linux软件包
-          - ✅ 预配置用户 `archuser` 拥有sudo权限
-          - ✅ 启用systemd
-          - ✅ 包含常用开发工具
-          - ✅ 针对WSL环境优化
+          ### 方法 1: 使用 .wsl 文件
+          ```powershell
+          # 下载 .wsl 文件后
+          wsl --import ArchLinux C:\WSL\ArchLinux archlinux-${{ needs.build.outputs.image-version }}.wsl
+          wsl --set-default ArchLinux
+          wsl -d ArchLinux
+          ```
           
-          ## 验证
+          ### 方法 2: 使用 .tar.gz 文件
+          ```powershell
+          # 下载 .tar.gz 文件后
+          wsl --import ArchLinux C:\WSL\ArchLinux archlinux-${{ needs.build.outputs.image-version }}.tar.gz
+          wsl --set-default ArchLinux
+          wsl -d ArchLinux
+          ```
           
-          使用 `sha256sum` 验证文件完整性
+          ## ✨ 特性
+          
+          - ✅ **最新的 Arch Linux** - 基于官方最新镜像
+          - ✅ **预配置用户** - `archuser` 用户具有 sudo 权限
+          - ✅ **systemd 支持** - 完整的 systemd 功能
+          - ✅ **开发工具** - 包含 `base-devel`、`git`、`vim` 等
+          - ✅ **网络管理** - 预装 NetworkManager
+          - ✅ **Python 支持** - 预装 Python 3 和 pip
+          - ✅ **WSL 优化** - 针对 WSL 环境优化配置
+          
+          ## 🔐 文件验证
+          
+          下载完成后请验证文件完整性：
+          
+          ```bash
+          # Windows (PowerShell)
+          Get-FileHash archlinux-${{ needs.build.outputs.image-version }}.wsl -Algorithm SHA256
+          
+          # Linux/macOS
+          sha256sum archlinux-${{ needs.build.outputs.image-version }}.wsl
+          ```
+          
+          ## 📋 系统信息
+          
+          - **用户名**: `archuser`
+          - **默认 Shell**: `/bin/bash`
+          - **包管理器**: `pacman`
+          - **系统架构**: `x86_64`
+          - **Locale**: `en_US.UTF-8`
+          
+          ## 🔧 首次使用建议
+          
+          ```bash
+          # 更新系统
+          sudo pacman -Syu
+          
+          # 安装 AUR helper (可选)
+          git clone https://aur.archlinux.org/yay.git
+          cd yay && makepkg -si
+          
+          # 配置 Git (如需要)
+          git config --global user.name "Your Name"
+          git config --global user.email "your.email@example.com"
+          ```
           
           ---
           
-          构建时间: ${{ github.run_id }}
-          提交: ${{ github.sha }}
+          📅 **构建时间**: ${{ github.run_id }}  
+          🔗 **提交**: [`${{ github.sha }}`](https://github.com/${{ github.repository }}/commit/${{ github.sha }})  
+          🤖 **自动构建**: GitHub Actions
         files: |
+          ./artifacts/*.wsl
           ./artifacts/*.tar.gz
-          ./artifacts/checksums.sha256
+          ./artifacts/*.sha256
         draft: false
         prerelease: false
+        
+  cleanup:
+    runs-on: ubuntu-latest
+    needs: [release]
+    if: github.event_name == 'schedule'
+    permissions:
+      contents: write
+      
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: Delete old releases
+      uses: actions/github-script@v7
+      with:
+        script: |
+          // 获取所有 releases
+          const releases = await github.rest.repos.listReleases({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            per_page: 100
+          });
+          
+          // 保留最新的 10 个 release，删除其他的
+          const releasesToDelete = releases.data.slice(10);
+          
+          for (const release of releasesToDelete) {
+            if (release.tag_name.startsWith('v')) {
+              console.log(`正在删除旧版本 ${release.tag_name}`);
+              
+              try {
+                await github.rest.repos.deleteRelease({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  release_id: release.id
+                });
+                
+                // 删除对应的 tag
+                await github.rest.git.deleteRef({
+                  owner: context.repo.owner,
+                  repo: context.repo.repo,
+                  ref: `tags/${release.tag_name}`
+                });
+                
+                console.log(`已删除版本 ${release.tag_name}`);
+              } catch (error) {
+                console.log(`删除版本 ${release.tag_name} 时出错: ${error.message}`);
+              }
+            }
+          }
+          
+          console.log('清理完成！保留了最新的 10 个版本。');
