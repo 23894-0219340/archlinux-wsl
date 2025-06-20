@@ -143,6 +143,8 @@ jobs:
           tag_name: ${{ github.ref_name }}  # 关键修正：使用纯标签名而不是完整引用路径
           name: archlinux-wsl-${{ steps.version.outputs.image-version }}
           files: |
-            ./workdir/output/*
+            artifacts/*.wsl
+            artifacts/*.tar.gz
+            artifacts/*.sha256
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
