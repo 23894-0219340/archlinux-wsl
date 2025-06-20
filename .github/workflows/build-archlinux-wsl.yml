@@ -141,10 +141,8 @@ jobs:
         uses: softprops/action-gh-release@v1
         with:
           tag_name: ${{ github.ref_name }}  # 关键修正：使用纯标签名而不是完整引用路径
-          name: Arch Linux RootFS ${{ github.ref_name }}
+          name: archlinux-wsl-${{ steps.version.outputs.image-version }}
           files: |
-            *.wsl
-            *.tar.gz
-            *.sha256
+            ./workdir/output/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
